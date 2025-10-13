@@ -17,12 +17,36 @@ Follow these steps to set up and run Bagbot:
    cd bagbot
    ```
 
-3. **Set Up a Python Virtual Environment**  
-   Install, create, and activate a Python virtual environment:
+3. **Set Up a Python Virtual Environment**
+
+   Install, create, and activate a Python virtual environment on **Windows**:
    ```bash
    pip3 install virtualenv
    virtualenv ~/.bagbotvirtualenv/
    source ~/.bagbotvirtualenv/bin/activate
+   ```
+   on **MacOS**:
+   ```bash
+   pip3 install virtualenv
+   python3.10 venv .bagbotvirtualenv
+   source .bagbotvirtualenv/bin/activate
+   ```
+
+   ***Note: Bittensor CLI is compatible with python versions from 3.9.0 to 3.12.0.***
+
+   Check the python version:
+   ```bash
+   python3 --version
+   ```
+   Install compatible version on **windows**:
+   ```bash
+   winget install Python.Python.3.10
+   refreshenv
+   ```
+   on **MacOS**:
+   ```bash
+   brew install python3.10
+   echo 'export PATH="/opt/homebrew/opt/python@3.10/bin:$PATH"' >> ~/.zshrc
    ```
 
 4. **Install Requirements**  
