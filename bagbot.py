@@ -163,18 +163,30 @@ class BittensorUtility():
 
     async def refresh_stats(self, hotkeys):
         try:
-            self.stats = await self.get_subnet_stats()
+            logger.info('Fetching subnet stats')
+            self.stats = await asyncio.wait_for(self.get_subnet_stats(), timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.error('Timeout fetching subnet stats after 30s')
+            raise
         except Exception as e:
             logger.error(traceback.format_exc())
             raise
 
         for hotkey in hotkeys:
-            self.current_stake_info[hotkey] = await self.sub.get_stake_for_coldkey_and_hotkey(
-                hotkey_ss58=hotkey,
-                coldkey_ss58=self.wallet.coldkey.ss58_address
+            logger.info(f'Fetching stake info for {hotkey}')
+            self.current_stake_info[hotkey] = await asyncio.wait_for(
+                self.sub.get_stake_for_coldkey_and_hotkey(
+                    hotkey_ss58=hotkey,
+                    coldkey_ss58=self.wallet.coldkey.ss58_address
+                ),
+                timeout=20.0
             )
 
-        self.balance = float(await self.sub.get_balance(address=self.wallet.coldkey.ss58_address))
+        logger.info('Fetching wallet balance')
+        self.balance = float(await asyncio.wait_for(
+            self.sub.get_balance(address=self.wallet.coldkey.ss58_address),
+            timeout=20.0
+        ))
 
         sumStakedValue = 0
         tickLog = []
@@ -197,9 +209,10 @@ class BittensorUtility():
             self.tick += 1
             start = time.time()
             try:
+                logger.info(f'Starting tick {self.tick}')
                 await self.refresh_stats([bagbot_settings.STAKE_ON_VALIDATOR])
 
-
+                logger.info(f'Tick {self.tick}: Printing table')
                 printHelpers.print_table_rich(self, console, self.current_stake_info, list(bagbot_settings.SUBNET_SETTINGS.keys()), self.stats, self.balance, self.subnet_grids)
                 if self.tick == 1 and not self.args.nocheck:
                     loop = asyncio.get_event_loop()
@@ -208,13 +221,19 @@ class BittensorUtility():
                         print('Exiting...')
                         return
 
+                logger.info(f'Tick {self.tick}: Checking trades')
                 for subnet_netuid in bagbot_settings.SUBNET_SETTINGS:
                     await self.do_available_trades(subnet_netuid)
 
                 logging.info(f'Finished tick {self.tick} in {time.time() - start:.2f} seconds')
                 #return
                 try:
-                    await self.sub.wait_for_block()
+                    logger.info(f'Tick {self.tick}: Waiting for next block')
+                    await asyncio.wait_for(self.sub.wait_for_block(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f'Tick {self.tick}: wait_for_block timed out after 30s, reconnecting...')
+                    await self.sub.close()
+                    self.sub = await my_async_subtensor("finney")
                 except (OSError, KeyError):
                     await asyncio.sleep(12) #if error with waiting for block, just wait approx 1 block and try again
 
@@ -228,10 +247,19 @@ class BittensorUtility():
                 logger.info(f'connection reset, retrying...')
                 await asyncio.sleep(3)
             except websockets.exceptions.InvalidStatus:
+                logger.info(f'potential server error, reconnecting...')
+                try:
+                    await self.sub.close()
+                except:
+                    pass
                 self.sub = await my_async_subtensor("finney")
-                logger.info(f'potential server error, retrying...')
             except asyncio.exceptions.TimeoutError:
-                logger.info(f'timeout error... retrying...')
+                logger.warning(f'Timeout error in tick {self.tick}, reconnecting subtensor...')
+                try:
+                    await self.sub.close()
+                except:
+                    pass
+                self.sub = await my_async_subtensor("finney")
                 await asyncio.sleep(3)
             finally:
                 try:
@@ -387,22 +415,28 @@ class BittensorUtility():
         buyTrade = self.constructBuy(subnet_netuid)
         if buyTrade:
             try:
-                stake_result = await self.sub.add_stake(
-                    wallet=self.wallet,
-                    hotkey_ss58=buyTrade['hotkey'],
-                    netuid=buyTrade['netuid'],
-                    amount=buyTrade['tao_amount'],
-                    rate_tolerance=buyTrade['max_slippage'],
-                    wait_for_inclusion=False,
-                    wait_for_finalization=False,
-                    safe_staking=True,
-                    allow_partial_stake=False
+                logger.info(f"Attempting to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']}")
+                stake_result = await asyncio.wait_for(
+                    self.sub.add_stake(
+                        wallet=self.wallet,
+                        hotkey_ss58=buyTrade['hotkey'],
+                        netuid=buyTrade['netuid'],
+                        amount=buyTrade['tao_amount'],
+                        rate_tolerance=buyTrade['max_slippage'],
+                        wait_for_inclusion=False,
+                        wait_for_finalization=False,
+                        safe_staking=True,
+                        allow_partial_stake=False
+                    ),
+                    timeout=45.0
                 )
                 print(f'after buy {str(buyTrade)}')
                 if stake_result is True:
                     logger.info(f"Staked {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
                 else:
                     logger.info(f"Failed to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout staking on subnet {buyTrade['netuid']} after 45s")
             except Exception as e:
                 print(f'ERROR staking')
                 logger.error(traceback.format_exc())
@@ -411,22 +445,28 @@ class BittensorUtility():
         sellTrade = self.constructSell(subnet_netuid)
         if sellTrade:
             try:
-                unstake_result = await self.sub.unstake(
-                    wallet=self.wallet,
-                    hotkey_ss58=sellTrade['hotkey'] ,
-                    netuid=sellTrade['netuid'],
-                    amount=sellTrade['alpha_amount'],
-                    rate_tolerance=sellTrade['max_slippage'],
-                    wait_for_inclusion=True,
-                    wait_for_finalization=False,
-                    safe_staking=True,
-                    allow_partial_stake=False
+                logger.info(f"Attempting to unstake {float(sellTrade['alpha_amount'])} alpha from subnet {sellTrade['netuid']}")
+                unstake_result = await asyncio.wait_for(
+                    self.sub.unstake(
+                        wallet=self.wallet,
+                        hotkey_ss58=sellTrade['hotkey'] ,
+                        netuid=sellTrade['netuid'],
+                        amount=sellTrade['alpha_amount'],
+                        rate_tolerance=sellTrade['max_slippage'],
+                        wait_for_inclusion=True,
+                        wait_for_finalization=False,
+                        safe_staking=True,
+                        allow_partial_stake=False
+                    ),
+                    timeout=60.0
                 )
                 print(f'after sell {str(sellTrade)}')
                 if unstake_result is True:
                     logger.info(f"Unstaked {float(sellTrade['alpha_amount'])} stake units from sn{sellTrade['netuid']} (approx. {sellTrade['approx_tao']:.4f} TAO value) at price: {self.stats[subnet_netuid]['price']}.  my threshold = {sellTrade['sell_threshold']}")
                 else:
                     logger.info(f"Failed to unstake {str(sellTrade)}  sn{subnet_netuid} ({str(unstake_result)})")
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout unstaking from subnet {subnet_netuid} after 60s")
             except asyncio.exceptions.CancelledError as e:
                 print(f'ERROR unstaking - cancelled error')
                 logger.error(traceback.format_exc())
