@@ -12,12 +12,16 @@ from bittensor.core.async_subtensor import get_async_subtensor
 import async_substrate_interface
 
 import printHelpers
-import bagbot_settings
 from decimal import Decimal, getcontext
 getcontext().prec = 16 #Precision for price stuff
 
 from rich.console import Console
 console = Console()
+
+import ast
+from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 class InvalidSettings(Exception): pass
 
@@ -32,6 +36,58 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def load_safe_python_settings():
+    settings = {}
+
+    # Determine where to look for the files (works in dev and when frozen with PyInstaller/Nuitka)
+    exe_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(".")
+
+    default_path = exe_dir / "bagbot_settings.py"
+    overrides_path = exe_dir / "bagbot_settings_overrides.py"
+
+    for path in [default_path, overrides_path]:
+        is_default = (path == default_path)
+
+        if not path.exists():
+            if is_default:
+                raise FileNotFoundError(f"CRITICAL: {path} is missing! Cannot continue.")
+            else:
+                print(f"Info: Optional overrides file not found (this is fine): {path}")
+                continue  # overrides are optional
+
+        source = path.read_text(encoding="utf-8")
+
+        try:
+            tree = ast.parse(source)  # mode='exec' by default → accepts real Python files
+        except SyntaxError as e:
+            raise SyntaxError(f"Invalid Python syntax in {path.name}: {e}") from e
+
+        for node in tree.body:
+            # Simple assignment: VAR = value
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name) and target.id.isidentifier():
+                    name = target.id
+                    try:
+                        value = ast.literal_eval(node.value)
+                        settings[name] = value
+                    except (ValueError, SyntaxError):
+                        print(f"Warning: Skipping unsafe or invalid value for '{name}' in {path.name}")
+
+            # Allow top-level comments / docstrings / pass etc. → just ignore them
+            # (optional) you can also support AnnAssign (typed vars) if you want:
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                name = node.target.id
+                if node.value:  # only if there's actually a value
+                    try:
+                        value = ast.literal_eval(node.value)
+                        settings[name] = value
+                    except (ValueError, SyntaxError):
+                        print(f"Warning: Skipping unsafe annotated assignment '{name}' in {path.name}")
+
+    return SimpleNamespace(**settings)
+
+bagbot_settings = load_safe_python_settings()
 
 def parseArgs():
     parser = argparse.ArgumentParser(description="A basic bittensor alpha bot")
@@ -65,6 +121,7 @@ class BittensorUtility():
         self.args = args
         self.current_stake_info = {}
         self.tick = 0
+        self.gridLoaded = False
 
 
     def get_subnet_setting(self, subnet_netuid, setting_name, default_value):
@@ -190,15 +247,27 @@ class BittensorUtility():
 
 
     async def refresh_subnet_grid(self):
-        self.subnet_grids = bagbot_settings.SUBNET_SETTINGS
-        self.validateGrid()
+        if not self.gridLoaded:
+            self.subnet_grids = bagbot_settings.SUBNET_SETTINGS
+            self.validateGrid()
+        self.gridLoaded = True
 
     def validateGrid(self):
         for subnet_id in self.subnet_grids:
+            if (self.subnet_grids[subnet_id].get('sell_lower') or self.subnet_grids[subnet_id].get('sell_upper')) and self.subnet_grids[subnet_id].get('sell'):
+                raise InvalidSettings(f'Do not mix and match [sell_lower + sell_upper] with [sell], pick one or the other.  Subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS: {self.subnet_grids[subnet_id]}')
+            if (self.subnet_grids[subnet_id].get('buy_lower') or self.subnet_grids[subnet_id].get('buy_upper')) and self.subnet_grids[subnet_id].get('buy'):
+                raise InvalidSettings(f'Do not mix and match [buy_lower + buy_upper] with [buy], pick one or the other.  Subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
             if not self.subnet_grids[subnet_id].get('sell_lower'):
-                raise InvalidSettings(f'"sell_lower" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
+                if self.subnet_grids[subnet_id].get('sell'):
+                    self.subnet_grids[subnet_id]['sell_lower'] = self.subnet_grids[subnet_id]['sell']
+                else:
+                    raise InvalidSettings(f'"sell_lower" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
             if not self.subnet_grids[subnet_id].get('buy_upper'):
-                raise InvalidSettings(f'"buy_upper" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
+                if self.subnet_grids[subnet_id].get('buy'):
+                    self.subnet_grids[subnet_id]['buy_upper'] = self.subnet_grids[subnet_id]['buy']
+                else:
+                    raise InvalidSettings(f'"buy_upper" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
             if not self.subnet_grids[subnet_id].get('max_alpha'):
                 raise InvalidSettings(f'"max_alpha" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
             if self.subnet_grids[subnet_id]['buy_upper'] > self.subnet_grids[subnet_id]['sell_lower']:
@@ -303,7 +372,6 @@ class BittensorUtility():
 
         logger.info('{' + f'wallet_value:"{sumStakedValue:.2f} + {self.balance:.2f}", ' + ', '.join(tickLog) + '}')
 
-        await self.refresh_subnet_grid()
 
 
     async def run(self):
