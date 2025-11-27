@@ -334,7 +334,26 @@ class BittensorUtility():
 
 
 
+    async def get_stake_for_hotkey(self, hotkey):
+        attempts = 10
+        for i in range(attempts):
+            try:
+                retval = await asyncio.wait_for(
+                            self.sub.get_stake_for_coldkey_and_hotkey(
+                                hotkey_ss58=hotkey,
+                                coldkey_ss58=self.wallet.coldkey.ss58_address
+                            ),
+                            timeout=20.0
+                        )
+                return retval
+            except asyncio.exceptions.TimeoutError:
+                logger.info('Timeout fetching hotkey stake')
+                await asyncio.sleep(10)
+        raise Exception("Too many attempts to refresh stats")
+
+
     async def refresh_stats(self, hotkeys):
+
         try:
             logger.info('Fetching subnet stats')
             self.stats = await asyncio.wait_for(self.get_subnet_stats(), timeout=30.0)
@@ -347,13 +366,7 @@ class BittensorUtility():
 
         for hotkey in hotkeys:
             logger.info(f'Fetching stake info for {hotkey}')
-            self.current_stake_info[hotkey] = await asyncio.wait_for(
-                self.sub.get_stake_for_coldkey_and_hotkey(
-                    hotkey_ss58=hotkey,
-                    coldkey_ss58=self.wallet.coldkey.ss58_address
-                ),
-                timeout=20.0
-            )
+            self.current_stake_info[hotkey] = await self.get_stake_for_hotkey(hotkey)
 
         logger.info('Fetching wallet balance')
         self.balance = float(await asyncio.wait_for(
