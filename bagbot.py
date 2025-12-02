@@ -104,13 +104,13 @@ rao_to_tao = lambda rao : int(rao)/1000000000.0
 
 async def my_async_subtensor(*args, **kwargs):
     attempts = 0
-    while attempts < 15:
+    while attempts < 20:
         try:
             return await get_async_subtensor(*args, **kwargs)
         except (websockets.exceptions.InvalidStatus, AttributeError, asyncio.exceptions.TimeoutError) as e:
             logger.error(f'Invalid status err {str(e)}, retrying')
             attempts += 1
-            if attempts >= 14:
+            if attempts >= 19:
                 raise
             await asyncio.sleep(attempts*2)
 
@@ -264,7 +264,7 @@ class BittensorUtility():
                 else:
                     raise InvalidSettings(f'"sell_lower" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
             if not self.subnet_grids[subnet_id].get('buy_upper'):
-                if self.subnet_grids[subnet_id].get('buy'):
+                if self.subnet_grids[subnet_id].get('buy') is not None:
                     self.subnet_grids[subnet_id]['buy_upper'] = self.subnet_grids[subnet_id]['buy']
                 else:
                     raise InvalidSettings(f'"buy_upper" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
@@ -444,8 +444,8 @@ class BittensorUtility():
             except ConnectionResetError:
                 logger.info(f'connection reset, retrying...')
                 await asyncio.sleep(3)
-            except websockets.exceptions.InvalidStatus:
-                logger.info(f'potential server error, reconnecting...')
+            except (websockets.exceptions.InvalidStatus, async_substrate_interface.errors.SubstrateRequestException, websockets.exceptions.ConnectionClosedError) as e:
+                logger.info(f'potential server error: {e}, reconnecting...')
                 try:
                     await self.sub.close()
                 except:
@@ -709,6 +709,7 @@ class BittensorUtility():
                 print(f'ERROR unstaking')
                 logger.error(traceback.format_exc())
                 logger.error(f"Failed to unstake from subnet {subnet_netuid}: {e}")
+                raise
 
 
 if __name__ == "__main__":
